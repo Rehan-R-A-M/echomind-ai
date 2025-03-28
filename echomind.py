@@ -3,13 +3,12 @@ from nltk.stem import WordNetLemmatizer
 from flask import Flask, render_template, request, jsonify
 import pickle
 import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer # type: ignore
-from sklearn.metrics.pairwise import cosine_similarity # type: ignore
+from sklearn.feature_extraction.text import TfidfVectorizer  # type: ignore
+from sklearn.metrics.pairwise import cosine_similarity  # type: ignore
 import random
 import ollama  # For local LLM integration
 from textblob import TextBlob  # For sentiment analysis
 from googletrans import Translator  # For multi-language support
-import json
 from datetime import datetime
 
 app = Flask(__name__)
@@ -21,13 +20,21 @@ nltk.download('punkt', quiet=True)
 nltk.download('wordnet', quiet=True)
 
 # Load intents and responses (fallback for when LLM isn’t used)
-with open('intents.pkl', 'rb') as f:
-    intents = pickle.load(f)
-with open('responses.pkl', 'rb') as f:
-    responses = pickle.load(f)
+try:
+    with open('intents.pkl', 'rb') as f:
+        intents = pickle.load(f)
+    with open('responses.pkl', 'rb') as f:
+        responses = pickle.load(f)
+except (FileNotFoundError, EOFError):
+    intents = []
+    responses = []
 
-vectorizer = TfidfVectorizer()
-X = vectorizer.fit_transform(intents)
+if intents and responses:
+    vectorizer = TfidfVectorizer()
+    X = vectorizer.fit_transform(intents)
+else:
+    vectorizer = None
+    X = None
 
 # Context storage (simple in-memory for now)
 chat_context = {}
@@ -51,12 +58,16 @@ def get_sentiment(text):
 def translate_text(text, dest_lang='en'):
     try:
         return translator.translate(text, dest=dest_lang).text
-    except:
+    except Exception:
         return text  # Fallback if translation fails
 
 def respond(user_input, user_id="default"):
     # Translate input to English if it’s not already
-    detected_lang = translator.detect(user_input).lang
+    try:
+        detected_lang = translator.detect(user_input).lang
+    except Exception:
+        detected_lang = 'en'
+
     if detected_lang != 'en':
         user_input_en = translate_text(user_input, 'en')
     else:
@@ -64,11 +75,6 @@ def respond(user_input, user_id="default"):
 
     # Sentiment analysis
     sentiment = get_sentiment(user_input_en)
-    sentiment_response = ""
-    if sentiment < -0.3:
-        sentiment_response = " Sounds like you're feeling down—hope I can help!"
-    elif sentiment > 0.3:
-        sentiment_response = " Glad you're in a good mood!"
 
     # Context handling
     if user_id not in chat_context:
@@ -88,18 +94,20 @@ def respond(user_input, user_id="default"):
             full_prompt = f"Context: {' '.join(context)}\nUser: {user_input_en}\nRespond naturally:"
             ollama_response = ollama.generate(model='llama3', prompt=full_prompt)['response']
             response = ollama_response.strip()
-        except:
+        except Exception:
             # Fallback to TF-IDF if LLM fails
-            tokens = nltk.word_tokenize(user_input_en.lower())
-            tokens = [lemmatizer.lemmatize(token) for token in tokens]
-            user_input_processed = ' '.join(tokens)
-            user_vector = vectorizer.transform([user_input_processed])
-            cosine_values = cosine_similarity(user_vector, X)
-            index = np.argmax(cosine_values)
-            response = responses[index]
+            if vectorizer and X is not None:
+                tokens = nltk.word_tokenize(user_input_en.lower())
+                tokens = [lemmatizer.lemmatize(token) for token in tokens]
+                user_input_processed = ' '.join(tokens)
+                user_vector = vectorizer.transform([user_input_processed])
+                cosine_values = cosine_similarity(user_vector, X)
+                index = np.argmax(cosine_values)
+                response = responses[index]
+            else:
+                response = "I'm sorry, I couldn't understand that."
 
-    # Add sentiment response and translate back if needed
-    response = response + sentiment_response
+    # Translate back if needed
     if detected_lang != 'en':
         response = translate_text(response, detected_lang)
 
